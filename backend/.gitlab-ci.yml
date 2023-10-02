@@ -1,0 +1,92 @@
+include:
+  - project: 'templates/ci'
+    file: 'DockerInDockerTemplate.yml'
+
+cache:
+  paths:
+    - ${CI_PROJECT_DIR}/.m2/repository
+
+variables:
+   VERSION: 1.0.$CI_PIPELINE_ID
+   MAVEN_REPO_PATH: ${CI_PROJECT_DIR}/.m2/repository
+   JAVA_OPTS: -XX:MaxRAMPercentage=90
+
+stages:
+   - test-sonar-qube
+   - build
+   - release
+   - deploy
+
+sonarqube-sast:
+  stage: test-sonar-qube
+  only:
+    changes:
+    - backend/*
+  image: gitlab.praktikum-services.ru:5050/std-012-005/sausage-store/maven:3.8-openjdk-16
+  script:
+    - cd backend
+    - >
+      mvn verify sonar:sonar -Dsonar.qualitygate.wait=true
+      -Dsonar.projectName=12_АЛЕКСАНДРОГАНОВ_БЭКЭНД
+      -Dsonar.projectKey=$SONAR_QUBE_PROJECT_KEY_BACKEND
+      -Dsonar.host.url=$SONAR_QUBE_URL
+      -Dsonar.login=$SONAR_QUBE_TOKEN_BACKEND
+
+build:
+  stage: build
+  image: gitlab.praktikum-services.ru:5050/std-012-005/sausage-store/docker:20.10.12-dind-rootless
+  only:
+    changes:
+    - backend/*
+  before_script:
+    - until docker info; do sleep 1; done
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - cd backend
+    - docker build --build-arg VERSION=$VERSION --tag $CI_REGISTRY_IMAGE/sausage-backend:$CI_COMMIT_SHA .
+    - docker push $CI_REGISTRY_IMAGE/sausage-backend:$CI_COMMIT_SHA
+
+release:
+  stage: release
+  variables:
+    GIT_STRATEGY: none
+  image: gitlab.praktikum-services.ru:5050/std-012-005/sausage-store/docker:20.10.12-dind-rootless
+  only:
+    changes:
+      - backend/*
+  needs:
+    - build
+  before_script:
+    - until docker info; do sleep 1; done
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker pull $CI_REGISTRY_IMAGE/sausage-backend:$CI_COMMIT_SHA
+    - docker tag $CI_REGISTRY_IMAGE/sausage-backend:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE/sausage-backend:latest
+    - docker push $CI_REGISTRY_IMAGE/sausage-backend:latest
+
+deploy:
+  stage: deploy
+  image: gitlab.praktikum-services.ru:5050/std-012-005/sausage-store/vault:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH == "healthcheck"'
+      when: manual
+  before_script:
+    - apk add openssh-client bash
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - export VAULT_ADDR=${VAULT_ADDR}
+    - export VAULT_TOKEN="$(vault write -field=token auth/jwt/login role=sausage-store jwt=$CI_JOB_JWT)"
+    - ssh ${DEV_USER}@${DEV_HOST}
+      "export "VERSION=${VERSION}";
+       export "SPRING_DATASOURCE_URL=jdbc:postgresql://${POSTGRESQL_HOST}:${POSTGRESQL_PORT}/${POSTGRESQL_DB}";
+       export "SPRING_DATASOURCE_USERNAME=$(vault kv get -field=spring.datasource.username secret/sausage-store)";
+       export "SPRING_DATASOURCE_PASSWORD=$(vault kv get -field=spring.datasource.password secret/sausage-store)";
+       export "SPRING_DATA_MONGODB_URI=$(vault kv get -field=spring.data.mongodb.uri secret/sausage-store)";
+      /bin/bash -s " < ./backend/deploy.sh

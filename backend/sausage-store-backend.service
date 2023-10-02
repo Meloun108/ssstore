@@ -1,0 +1,21 @@
+[Unit]
+Description=SausageStore backend service
+After=syslog.target
+After=network.target
+
+[Service]
+SuccessExitStatus=143
+User=jarservice
+Group=jarusers
+Type=simple
+StandardOutput=file:/opt/log/sausage-store-backend.log
+Environment=LOG_PATH=/
+Environment=REPORT_PATH=/var/www-data/htdocs/
+WorkingDirectory=/var/jarservice
+ExecStart=/bin/java -jar sausage-store.jar --spring.datasource.url=jdbc:postgresql://${POSTGRESQL_HOST}:${POSTGRESQL_PORT}/${POSTGRESQL_DB} --spring.datasource.username=${POSTGRESQL_USER} --spring.datasource.password=${POSTGRESQL_PASS} --spring.data.mongodb.uri=mongodb://${MONGO_USER}:${MONGO_PASS}@${MONGO_HOST}:${MONGO_PORT}/${MONGO_SCHEMA}?tls=true 
+ExecStop=/bin/kill -9 $MAINPID
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
